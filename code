@@ -1,0 +1,699 @@
+#region VEXcode Generated Robot Configuration
+import math
+import random
+from vexcode_vr import *
+
+brain=Brain()
+
+drivetrain = Drivetrain("drivetrain", 0)
+pen = Pen("pen", 8)
+pen.set_pen_width(THIN)
+left_bumper = Bumper("leftBumper", 2)
+right_bumper = Bumper("rightBumper", 3)#region VEXcode Generated Robot Configuration
+from vexcode_vr import *
+
+drivetrain = Drivetrain("drivetrain", 0)
+pen = Pen("pen", 8)
+pen.set_pen_width(THIN)
+down_eye = EyeSensor("downEye", 5)
+front_distance = Distance("frontdistance", 6)
+location = Location("location", 9)
+#endregion VEXcode Generated Robot Configuration
+
+STEP = 250          # distance moved each step (one tile)
+OPEN = 180          # distance threshold for detecting open paths
+KEY = 50            # grid rounding size for mapping positions
+
+rightDist = 0
+frontDist = 0
+leftDist = 0
+
+heading = 0         # robot direction: 0=N, 1=E, 2=S, 3=W
+moved_steps = 0     # counts how many steps have been taken
+
+edges = {}          # graph connections between maze tiles
+route = []          # recorded movement history (fallback)
+
+finishk = None      # finish tile key
+
+def turnR():
+    # turn right and update heading
+    global heading
+    drivetrain.turn_for(RIGHT, 90, DEGREES)
+    heading = (heading + 1) % 4
+
+def turnL():
+    # turn left and update heading
+    global heading
+    drivetrain.turn_for(LEFT, 90, DEGREES)
+    heading = (heading - 1) % 4
+
+def turn180():
+    # turn around and update heading
+    global heading
+    drivetrain.turn_for(RIGHT, 180, DEGREES)
+    heading = (heading + 2) % 4
+
+def curkey():
+    # convert robot position into a grid key string
+    x = location.position(X, MM)
+    y = location.position(Y, MM)
+    kx = int(round(x / KEY))
+    ky = int(round(y / KEY))
+    return str(kx) + ":" + str(ky)
+
+def key_xy(k):
+    # split a key string back into coordinates
+    p = k.split(":")
+    return int(p[0]), int(p[1])
+
+def add_edge(a, b):
+    # store a two-way connection in the maze graph
+    if a not in edges: edges[a] = set()
+    if b not in edges: edges[b] = set()
+    edges[a].add(b)
+    edges[b].add(a)
+
+def scan():
+    # measure distances right, front, left
+    global rightDist, frontDist, leftDist
+    turnR()
+    rightDist = front_distance.get_distance(MM)
+    turnL()
+    frontDist = front_distance.get_distance(MM)
+    turnL()
+    leftDist = front_distance.get_distance(MM)
+    turnR()
+
+def step_dir_pref():
+    # choose direction using right-hand wall following
+    scan()
+    if rightDist > OPEN: return 1
+    if frontDist > OPEN: return 0
+    if leftDist > OPEN: return -1
+    return 2
+
+def rotate_to(offset):
+    # rotate robot based on chosen offset
+    if offset == 0:
+        return
+    if offset == 1:
+        turnR()
+    elif offset == -1:
+        turnL()
+    else:
+        turn180()
+
+def drive_step_and_map(prevk):
+    # drive one tile forward and record it in the graph
+    global moved_steps
+    drivetrain.drive_for(FORWARD, STEP, MM)
+    moved_steps += 1
+    nk = curkey()
+    add_edge(prevk, nk)
+    route.append(nk)
+    return nk
+
+def want_heading_from_delta(dx, dy):
+    # convert coordinate movement into heading value
+    if abs(dx) > abs(dy):
+        return 1 if dx > 0 else 3
+    return 0 if dy > 0 else 2
+
+def bfs_path(start, goal):
+    # BFS shortest path search through mapped maze
+    if start == goal:
+        return [start]
+    if start not in edges or goal not in edges:
+        return []
+    q = [start]
+    prev = {start: None}
+    qi = 0
+    while qi < len(q):
+        u = q[qi]
+        qi += 1
+        if u == goal:
+            break
+        for v in edges.get(u, []):
+            if v not in prev:
+                prev[v] = u
+                q.append(v)
+    if goal not in prev:
+        return []
+    out = []
+    cur = goal
+    while cur is not None:
+        out.append(cur)
+        cur = prev[cur]
+    out.reverse()
+    return out
+
+def follow_keys(path, stop_on_red):
+    # follow a shortest path node-by-node
+    global heading
+    if len(path) < 2:
+        return
+    for i in range(1, len(path)):
+        if stop_on_red and down_eye.detect(RED):
+            return
+        a = curkey()
+        ax, ay = key_xy(a)
+        bx, by = key_xy(path[i])
+        dx = bx - ax
+        dy = by - ay
+        want = want_heading_from_delta(dx, dy)
+        while heading != want:
+            turnR()
+        if front_distance.get_distance(MM) < OPEN:
+            return
+        drivetrain.drive_for(FORWARD, STEP, MM)
+        if stop_on_red and down_eye.detect(RED):
+            return
+
+def reverse_route_to_start(startk):
+    # fallback: retrace the exact recorded route back home
+    global heading
+    i = len(route) - 1
+    while i >= 0:
+        if curkey() == startk:
+            return
+        tgt = route[i]
+        if tgt == curkey():
+            i -= 1
+            continue
+        ax, ay = key_xy(curkey())
+        bx, by = key_xy(tgt)
+        dx = bx - ax
+        dy = by - ay
+        want = want_heading_from_delta(dx, dy)
+        while heading != want:
+            turnR()
+        if front_distance.get_distance(MM) < OPEN:
+            return
+        drivetrain.drive_for(FORWARD, STEP, MM)
+        i -= 1
+
+def when_started1():
+    # main program: reach finish, return home, then fastest route back
+    global heading, moved_steps, edges, route, finishk
+
+    pen.set_pen_color(BLUE)
+    pen.move(DOWN)
+
+    drivetrain.set_drive_velocity(180, PERCENT)
+    drivetrain.set_turn_velocity(180, PERCENT)
+
+    heading = 0
+    moved_steps = 0
+    edges = {}
+    route = []
+    finishk = None
+
+    startk = curkey()
+    route.append(startk)
+
+    cur = startk
+
+    while True:
+        # map maze until finish is found
+        if down_eye.detect(RED) and moved_steps > 2:
+            finishk = curkey()
+            break
+        d = step_dir_pref()
+        rotate_to(d)
+        cur = drive_step_and_map(cur)
+
+    # turn around after finish and move forward one tile
+    turn180()
+    prevk = curkey()
+    drivetrain.drive_for(FORWARD, STEP, MM)
+    afterk = curkey()
+    add_edge(prevk, afterk)
+    route.append(afterk)
+
+    # return home using shortest path
+    path_home = bfs_path(afterk, startk)
+    if len(path_home) >= 2:
+        follow_keys(path_home, False)
+    else:
+        reverse_route_to_start(startk)
+
+    # switch pen to green for fastest route run
+    pen.set_pen_color(GREEN)
+
+    # fastest route from start back to finish
+    path_fast = bfs_path(startk, finishk)
+    follow_keys(path_fast, True)
+
+    drivetrain.stop()
+
+vr_thread(when_started1)
+
+front_eye = EyeSensor("frontEye", 4)
+down_eye = EyeSensor("downEye", 5)
+front_distance = Distance("frontdistance", 6)
+distance = front_distance
+magnet = Electromagnet("magnet", 7)
+location = Location("location", 9)
+#endregion VEXcode Generated Robot Configuration
+
+STEP = 250
+OPEN = 180
+KEY = 50
+
+rightDist = 0
+frontDist = 0
+leftDist = 0
+
+heading = 0
+moved_steps = 0
+
+edges = {}
+route = []
+
+finishk = None
+
+def turnR():
+    global heading
+    drivetrain.turn_for(RIGHT, 90, DEGREES)
+    heading = (heading + 1) % 4
+
+def turnL():
+    global heading
+    drivetrain.turn_for(LEFT, 90, DEGREES)
+    heading = (heading - 1) % 4
+
+def turn180():
+    global heading
+    drivetrain.turn_for(RIGHT, 180, DEGREES)
+    heading = (heading + 2) % 4
+
+def curkey():
+    x = location.position(X, MM)
+    y = location.position(Y, MM)
+    kx = int(round(x / KEY))
+    ky = int(round(y / KEY))
+    return str(kx) + ":" + str(ky)
+
+def key_xy(k):
+    p = k.split(":")
+    return int(p[0]), int(p[1])
+
+def add_edge(a, b):
+    if a not in edges: edges[a] = set()
+    if b not in edges: edges[b] = set()
+    edges[a].add(b)
+    edges[b].add(a)
+
+def scan():
+    global rightDist, frontDist, leftDist
+    turnR()
+    rightDist = front_distance.get_distance(MM)
+    turnL()
+    frontDist = front_distance.get_distance(MM)
+    turnL()
+    leftDist = front_distance.get_distance(MM)
+    turnR()
+
+def step_dir_pref():
+    scan()
+    if rightDist > OPEN: return 1
+    if frontDist > OPEN: return 0
+    if leftDist > OPEN: return -1
+    return 2
+
+def rotate_to(offset):
+    if offset == 0:
+        return
+    if offset == 1:
+        turnR()
+    elif offset == -1:
+        turnL()
+    else:
+        turn180()
+
+def drive_step_and_map(prevk):
+    global moved_steps
+    drivetrain.drive_for(FORWARD, STEP, MM)
+    moved_steps += 1
+    nk = curkey()
+    add_edge(prevk, nk)
+    route.append(nk)
+    return nk
+
+def want_heading_from_delta(dx, dy):
+    if abs(dx) > abs(dy):
+        return 1 if dx > 0 else 3
+    return 0 if dy > 0 else 2
+
+def bfs_path(start, goal):
+    if start == goal:
+        return [start]
+    if start not in edges or goal not in edges:
+        return []
+    q = [start]
+    prev = {start: None}
+    qi = 0
+    while qi < len(q):
+        u = q[qi]
+        qi += 1
+        if u == goal:
+            break
+        for v in edges.get(u, []):
+            if v not in prev:
+                prev[v] = u
+                q.append(v)
+    if goal not in prev:
+        return []
+    out = []
+    cur = goal
+    while cur is not None:
+        out.append(cur)
+        cur = prev[cur]
+    out.reverse()
+    return out
+
+def follow_keys(path, stop_on_red):
+    global heading
+    if len(path) < 2:
+        return
+    for i in range(1, len(path)):
+        if stop_on_red and down_eye.detect(RED):
+            return
+        a = curkey()
+        ax, ay = key_xy(a)
+        bx, by = key_xy(path[i])
+        dx = bx - ax
+        dy = by - ay
+        want = want_heading_from_delta(dx, dy)
+        while heading != want:
+            turnR()
+        if front_distance.get_distance(MM) < OPEN:
+            return
+        drivetrain.drive_for(FORWARD, STEP, MM)
+        if stop_on_red and down_eye.detect(RED):
+            return
+
+def reverse_route_to_start(startk):
+    global heading
+    i = len(route) - 1
+    while i >= 0:
+        if curkey() == startk:
+            return
+        tgt = route[i]
+        if tgt == curkey():
+            i -= 1
+            continue
+        ax, ay = key_xy(curkey())
+        bx, by = key_xy(tgt)
+        dx = bx - ax
+        dy = by - ay
+        want = want_heading_from_delta(dx, dy)
+        while heading != want:
+            turnR()
+        if front_distance.get_distance(MM) < OPEN:
+            return
+        drivetrain.drive_for(FORWARD, STEP, MM)
+        i -= 1
+
+def when_started1():
+    global heading, moved_steps, edges, route, finishk
+
+    pen.set_pen_width(THIN)
+    pen.set_pen_color(BLUE)
+    pen.move(DOWN)
+
+    drivetrain.set_drive_velocity(180, PERCENT)
+    drivetrain.set_turn_velocity(180, PERCENT)
+    drivetrain.set_timeout(1, SECONDS)
+
+    heading = 0
+    moved_steps = 0
+    edges = {}
+    route = []
+    finishk = None
+
+    startk = curkey()
+    route.append(startk)
+
+    cur = startk
+
+    while True:
+        if down_eye.detect(RED) and moved_steps > 2:
+            finishk = curkey()
+            break
+        d = step_dir_pref()
+        rotate_to(d)
+        cur = drive_step_and_map(cur)
+
+    turn180()
+    prevk = curkey()
+    drivetrain.drive_for(FORWARD, STEP, MM)
+    afterk = curkey()
+    add_edge(prevk, afterk)
+    route.append(afterk)
+
+    path_home = bfs_path(afterk, startk)
+    if len(path_home) >= 2:
+        follow_keys(path_home, False)
+    else:
+        reverse_route_to_start(startk)
+
+    pen.set_pen_color(GREEN)
+
+    path_fast = bfs_path(startk, finishk)
+    follow_keys(path_fast, True)
+
+    drivetrain.stop()
+
+vr_thread(when_started1)
+#region VEXcode Generated Robot Configuration
+import math
+import random
+from vexcode_vr import *
+
+brain=Brain()
+
+drivetrain = Drivetrain("drivetrain", 0)
+pen = Pen("pen", 8)
+pen.set_pen_width(THIN)
+left_bumper = Bumper("leftBumper", 2)
+right_bumper = Bumper("rightBumper", 3)
+front_eye = EyeSensor("frontEye", 4)
+down_eye = EyeSensor("downEye", 5)
+front_distance = Distance("frontdistance", 6)
+distance = front_distance
+magnet = Electromagnet("magnet", 7)
+location = Location("location", 9)
+#endregion VEXcode Generated Robot Configuration
+
+STEP = 250
+OPEN = 180
+KEY = 50
+
+rightDist = 0
+frontDist = 0
+leftDist = 0
+
+heading = 0
+moved_steps = 0
+
+edges = {}
+route = []
+
+finishk = None
+
+def turnR():
+    global heading
+    drivetrain.turn_for(RIGHT, 90, DEGREES)
+    heading = (heading + 1) % 4
+
+def turnL():
+    global heading
+    drivetrain.turn_for(LEFT, 90, DEGREES)
+    heading = (heading - 1) % 4
+
+def turn180():
+    global heading
+    drivetrain.turn_for(RIGHT, 180, DEGREES)
+    heading = (heading + 2) % 4
+
+def curkey():
+    x = location.position(X, MM)
+    y = location.position(Y, MM)
+    kx = int(round(x / KEY))
+    ky = int(round(y / KEY))
+    return str(kx) + ":" + str(ky)
+
+def key_xy(k):
+    p = k.split(":")
+    return int(p[0]), int(p[1])
+
+def add_edge(a, b):
+    if a not in edges: edges[a] = set()
+    if b not in edges: edges[b] = set()
+    edges[a].add(b)
+    edges[b].add(a)
+
+def scan():
+    global rightDist, frontDist, leftDist
+    turnR()
+    rightDist = front_distance.get_distance(MM)
+    turnL()
+    frontDist = front_distance.get_distance(MM)
+    turnL()
+    leftDist = front_distance.get_distance(MM)
+    turnR()
+
+def step_dir_pref():
+    scan()
+    if rightDist > OPEN: return 1
+    if frontDist > OPEN: return 0
+    if leftDist > OPEN: return -1
+    return 2
+
+def rotate_to(offset):
+    if offset == 0:
+        return
+    if offset == 1:
+        turnR()
+    elif offset == -1:
+        turnL()
+    else:
+        turn180()
+
+def drive_step_and_map(prevk):
+    global moved_steps
+    drivetrain.drive_for(FORWARD, STEP, MM)
+    moved_steps += 1
+    nk = curkey()
+    add_edge(prevk, nk)
+    route.append(nk)
+    return nk
+
+def want_heading_from_delta(dx, dy):
+    if abs(dx) > abs(dy):
+        return 1 if dx > 0 else 3
+    return 0 if dy > 0 else 2
+
+def bfs_path(start, goal):
+    if start == goal:
+        return [start]
+    if start not in edges or goal not in edges:
+        return []
+    q = [start]
+    prev = {start: None}
+    qi = 0
+    while qi < len(q):
+        u = q[qi]
+        qi += 1
+        if u == goal:
+            break
+        for v in edges.get(u, []):
+            if v not in prev:
+                prev[v] = u
+                q.append(v)
+    if goal not in prev:
+        return []
+    out = []
+    cur = goal
+    while cur is not None:
+        out.append(cur)
+        cur = prev[cur]
+    out.reverse()
+    return out
+
+def follow_keys(path, stop_on_red):
+    global heading
+    if len(path) < 2:
+        return
+    for i in range(1, len(path)):
+        if stop_on_red and down_eye.detect(RED):
+            return
+        a = curkey()
+        ax, ay = key_xy(a)
+        bx, by = key_xy(path[i])
+        dx = bx - ax
+        dy = by - ay
+        want = want_heading_from_delta(dx, dy)
+        while heading != want:
+            turnR()
+        if front_distance.get_distance(MM) < OPEN:
+            return
+        drivetrain.drive_for(FORWARD, STEP, MM)
+        if stop_on_red and down_eye.detect(RED):
+            return
+
+def reverse_route_to_start(startk):
+    global heading
+    i = len(route) - 1
+    while i >= 0:
+        if curkey() == startk:
+            return
+        tgt = route[i]
+        if tgt == curkey():
+            i -= 1
+            continue
+        ax, ay = key_xy(curkey())
+        bx, by = key_xy(tgt)
+        dx = bx - ax
+        dy = by - ay
+        want = want_heading_from_delta(dx, dy)
+        while heading != want:
+            turnR()
+        if front_distance.get_distance(MM) < OPEN:
+            return
+        drivetrain.drive_for(FORWARD, STEP, MM)
+        i -= 1
+
+def when_started1():
+    global heading, moved_steps, edges, route, finishk
+
+    pen.set_pen_width(THIN)
+    pen.set_pen_color(BLUE)
+    pen.move(DOWN)
+
+    drivetrain.set_drive_velocity(180, PERCENT)
+    drivetrain.set_turn_velocity(180, PERCENT)
+    drivetrain.set_timeout(1, SECONDS)
+
+    heading = 0
+    moved_steps = 0
+    edges = {}
+    route = []
+    finishk = None
+
+    startk = curkey()
+    route.append(startk)
+
+    cur = startk
+
+    while True:
+        if down_eye.detect(RED) and moved_steps > 2:
+            finishk = curkey()
+            break
+        d = step_dir_pref()
+        rotate_to(d)
+        cur = drive_step_and_map(cur)
+
+    turn180()
+    prevk = curkey()
+    drivetrain.drive_for(FORWARD, STEP, MM)
+    afterk = curkey()
+    add_edge(prevk, afterk)
+    route.append(afterk)
+
+    path_home = bfs_path(afterk, startk)
+    if len(path_home) >= 2:
+        follow_keys(path_home, False)
+    else:
+        reverse_route_to_start(startk)
+
+    pen.set_pen_color(GREEN)
+
+    path_fast = bfs_path(startk, finishk)
+    follow_keys(path_fast, True)
+
+    drivetrain.stop()
+
+vr_thread(when_started1)
